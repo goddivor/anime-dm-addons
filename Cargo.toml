@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["addons/*/*"]
+
+# `addon-api` est le contrat partagé : il vit dans le repo de l'app (anime-dm) et
+# est référencé par chemin (les deux repos sont côte à côte sous rust-project/).
+[workspace.dependencies]
+addon-api = { path = "../anime-dm/src-tauri/addon-api" }
+extism-pdk = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+scraper = "0.27"
+regex = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
