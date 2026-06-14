@@ -92,6 +92,8 @@ pub fn video_list(input: Json<Hoster>) -> FnResult<Json<Vec<Video>>> {
         streamtape(&hoster.url)?
     } else if host.contains("mail.ru") {
         mailru(&hoster.url)?
+    } else if host.contains("voe") {
+        voe(&hoster.url)?
     } else {
         Vec::new()
     };
@@ -218,6 +220,77 @@ fn mailru(embed_url: &str) -> Result<Vec<Video>, Error> {
         headers: h,
         ..Default::default()
     }])
+}
+
+fn voe(url: &str) -> Result<Vec<Video>, Error> {
+    let mut html = fetch(url, &[])?;
+    if let Some(c) = regex::Regex::new(r#"window\.location\.href\s*=\s*'([^']+)'"#)
+        .unwrap()
+        .captures(&html)
+    {
+        html = fetch(&c[1].to_string(), &[])?;
+    }
+
+    let doc = Html::parse_document(&html);
+    let sel = Selector::parse(r#"script[type="application/json"]"#).unwrap();
+    let Some(raw) = doc.select(&sel).next().map(|e| e.text().collect::<String>()) else {
+        return Ok(Vec::new());
+    };
+    let encoded = raw
+        .trim()
+        .trim_start_matches("[\"")
+        .trim_end_matches("\"]");
+
+    let Some(meta) = voe_decrypt(encoded) else {
+        return Ok(Vec::new());
+    };
+    let h = headers(&[("Referer", "https://voe.sx/")]);
+    let mut out = Vec::new();
+    if let Some(src) = meta.get("source").and_then(|v| v.as_str()) {
+        out.push(Video {
+            url: src.to_string(),
+            quality: "Voe HLS".into(),
+            headers: h.clone(),
+            ..Default::default()
+        });
+    }
+    if let Some(mp4) = meta.get("direct_access_url").and_then(|v| v.as_str()) {
+        out.push(Video {
+            url: mp4.to_string(),
+            quality: "Voe MP4".into(),
+            headers: h,
+            ..Default::default()
+        });
+    }
+    Ok(out)
+}
+
+/// Reverse VOE's `f7` obfuscation: rot13 → strip junk patterns/underscores →
+/// base64 → shift each byte by -3 → reverse → base64 → JSON.
+fn voe_decrypt(input: &str) -> Option<serde_json::Value> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let rot13: String = input
+        .chars()
+        .map(|c| match c {
+            'A'..='Z' => (((c as u8 - b'A' + 13) % 26) + b'A') as char,
+            'a'..='z' => (((c as u8 - b'a' + 13) % 26) + b'a') as char,
+            _ => c,
+        })
+        .collect();
+
+    let mut cleaned = rot13;
+    for p in ["@$", "^^", "~@", "%?", "*~", "!!", "#&"] {
+        cleaned = cleaned.replace(p, "_");
+    }
+    cleaned = cleaned.replace('_', "");
+
+    let step1 = b64.decode(cleaned.as_bytes()).ok()?;
+    let shifted: Vec<u8> = step1.iter().map(|b| b.wrapping_sub(3)).collect();
+    let reversed: Vec<u8> = shifted.into_iter().rev().collect();
+    let step2 = b64.decode(&reversed).ok()?;
+    serde_json::from_slice(&step2).ok()
 }
 
 fn quality_rank(key: &str) -> u32 {
