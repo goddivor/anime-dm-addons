@@ -10,13 +10,29 @@ use scraper::{Html, Selector};
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const DEFAULT_BASE: &str = "https://voir-anime.to";
 const PREF_BASE_URL: &str = "base_url";
+const PREF_PLAYER: &str = "preferred_player";
+const PREF_QUALITY: &str = "quality";
+const AUTO: &str = "Auto";
+
+const PLAYERS: [&str; 7] = [
+    "LECTEUR myTV",
+    "LECTEUR Stape",
+    "LECTEUR VOE",
+    "LECTEUR FHD1",
+    "LECTEUR MOON",
+    "LECTEUR SB",
+    "LECTEUR YU",
+];
+
+const QUALITIES: [&str; 4] = ["Auto", "1080", "720", "480"];
+
+fn cfg(key: &str) -> Option<String> {
+    config::get(key).ok().flatten().filter(|s| !s.is_empty())
+}
 
 /// The site URL, overridable from the app (Extism plugin config), else the default.
 fn base_url() -> String {
-    config::get(PREF_BASE_URL)
-        .ok()
-        .flatten()
-        .filter(|s| !s.is_empty())
+    cfg(PREF_BASE_URL)
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| DEFAULT_BASE.to_string())
 }
@@ -64,14 +80,34 @@ pub fn metadata() -> FnResult<Json<Metadata>> {
 
 #[plugin_fn]
 pub fn preferences() -> FnResult<Json<Vec<Preference>>> {
-    Ok(Json(vec![Preference {
-        key: PREF_BASE_URL.into(),
-        title: "URL du site".into(),
-        summary: Some("Domaine de Voir-Anime (ex : https://voir-anime.to)".into()),
-        default: DEFAULT_BASE.into(),
-        kind: PreferenceKind::Text,
-        options: Vec::new(),
-    }]))
+    let mut player_opts = vec![AUTO.to_string()];
+    player_opts.extend(PLAYERS.iter().map(|s| s.to_string()));
+    Ok(Json(vec![
+        Preference {
+            key: PREF_BASE_URL.into(),
+            title: "URL du site".into(),
+            summary: Some("Domaine de Voir-Anime (ex : https://voir-anime.to)".into()),
+            default: DEFAULT_BASE.into(),
+            kind: PreferenceKind::Text,
+            options: Vec::new(),
+        },
+        Preference {
+            key: PREF_PLAYER.into(),
+            title: "Lecteur préféré".into(),
+            summary: Some("Lecteur essayé en premier pour le téléchargement.".into()),
+            default: AUTO.into(),
+            kind: PreferenceKind::Select,
+            options: player_opts,
+        },
+        Preference {
+            key: PREF_QUALITY.into(),
+            title: "Qualité préférée".into(),
+            summary: Some("Appliquée quand le lecteur propose plusieurs qualités (FHD1).".into()),
+            default: AUTO.into(),
+            kind: PreferenceKind::Select,
+            options: QUALITIES.iter().map(|s| s.to_string()).collect(),
+        },
+    ]))
 }
 
 #[plugin_fn]
@@ -89,7 +125,14 @@ pub fn episode_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Episode>>> {
 #[plugin_fn]
 pub fn hoster_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Hoster>>> {
     let html = get(&input.0.url)?;
-    Ok(Json(parse_hosters(&html)))
+    let mut hosters = parse_hosters(&html);
+    if let Some(pref) = cfg(PREF_PLAYER).filter(|p| p != AUTO) {
+        if let Some(i) = hosters.iter().position(|h| h.name.eq_ignore_ascii_case(&pref)) {
+            let chosen = hosters.remove(i);
+            hosters.insert(0, chosen);
+        }
+    }
+    Ok(Json(hosters))
 }
 
 #[plugin_fn]
@@ -225,7 +268,17 @@ fn mailru(embed_url: &str) -> Result<Vec<Video>, Error> {
     }
 
     let meta: Meta = serde_json::from_str(&body)?;
-    let Some(best) = meta.videos.into_iter().max_by_key(|v| quality_rank(&v.key)) else {
+    let want = cfg(PREF_QUALITY)
+        .filter(|q| q != AUTO)
+        .and_then(|q| q.parse::<u32>().ok());
+    let best = match want {
+        Some(target) => meta
+            .videos
+            .into_iter()
+            .min_by_key(|v| quality_rank(&v.key).abs_diff(target)),
+        None => meta.videos.into_iter().max_by_key(|v| quality_rank(&v.key)),
+    };
+    let Some(best) = best else {
         return Ok(Vec::new());
     };
     let url = match best.url.strip_prefix("//") {
