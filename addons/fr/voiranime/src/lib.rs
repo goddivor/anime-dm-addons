@@ -1,13 +1,25 @@
 use std::collections::{BTreeMap, HashSet};
 
 use addon_api::{
-    Anime, AnimesPage, Episode, Hoster, Metadata, PageInput, SearchInput, UrlInput, Video,
+    Anime, AnimesPage, Episode, Hoster, Metadata, PageInput, Preference, PreferenceKind,
+    SearchInput, UrlInput, Video,
 };
 use extism_pdk::*;
 use scraper::{Html, Selector};
 
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const BASE: &str = "https://voir-anime.to";
+const DEFAULT_BASE: &str = "https://voir-anime.to";
+const PREF_BASE_URL: &str = "base_url";
+
+/// The site URL, overridable from the app (Extism plugin config), else the default.
+fn base_url() -> String {
+    config::get(PREF_BASE_URL)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| DEFAULT_BASE.to_string())
+}
 
 /// Fetch a URL as text through the host's HTTP capability, with a browser UA + extra headers.
 fn fetch(url: &str, headers: &[(&str, &str)]) -> Result<String, Error> {
@@ -22,7 +34,8 @@ fn fetch(url: &str, headers: &[(&str, &str)]) -> Result<String, Error> {
 }
 
 fn get(url: &str) -> Result<String, Error> {
-    fetch(url, &[("Referer", BASE)])
+    let referer = base_url();
+    fetch(url, &[("Referer", &referer)])
 }
 
 fn host_of(url: &str) -> String {
@@ -43,10 +56,22 @@ pub fn metadata() -> FnResult<Json<Metadata>> {
         id: "fr.voiranime".into(),
         name: "Voir-Anime".into(),
         lang: "fr".into(),
-        base_url: BASE.into(),
+        base_url: base_url(),
         version: env!("CARGO_PKG_VERSION").into(),
         nsfw: false,
     }))
+}
+
+#[plugin_fn]
+pub fn preferences() -> FnResult<Json<Vec<Preference>>> {
+    Ok(Json(vec![Preference {
+        key: PREF_BASE_URL.into(),
+        title: "URL du site".into(),
+        summary: Some("Domaine de Voir-Anime (ex : https://voir-anime.to)".into()),
+        default: DEFAULT_BASE.into(),
+        kind: PreferenceKind::Text,
+        options: Vec::new(),
+    }]))
 }
 
 #[plugin_fn]
