@@ -317,7 +317,70 @@ pub fn hoster_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Hoster>>> {
 
 #[plugin_fn]
 pub fn video_list(input: Json<Hoster>) -> FnResult<Json<Vec<Video>>> {
-    Ok(Json(extract(&input.0.url)?))
+    let url = input.0.url;
+    let host = host_of(&url);
+    let videos = if is_dood(&host) {
+        dood(&url)?
+    } else {
+        extract(&url)?
+    };
+    Ok(Json(videos))
+}
+
+fn is_dood(host: &str) -> bool {
+    ["dood", "dsvplay", "myvidplay", "playmogo", "ds2play", "d000d", "all3do"]
+        .iter()
+        .any(|k| host.contains(k))
+}
+
+/// DoodStream token flow (all-HTTP): the page exposes `'/pass_md5/<path>/<token>'`,
+/// a GET on it returns the base URL, then `base + nonce + ?token=&expiry=` is the mp4.
+fn dood(url: &str) -> Result<Vec<Video>, Error> {
+    let host = host_of(url);
+    let referer_host = format!("https://{host}/");
+    let html = fetch(url, &[("Referer", &referer_host)])?;
+    let Some(md5) = html
+        .split("'/pass_md5/")
+        .nth(1)
+        .and_then(|s| s.split('\'').next())
+    else {
+        return Ok(Vec::new());
+    };
+    let token = md5.rsplit('/').next().unwrap_or("");
+    let base = fetch(&format!("https://{host}/pass_md5/{md5}"), &[("Referer", url)])?;
+    let base = base.trim();
+    if !base.starts_with("http") {
+        return Ok(Vec::new());
+    }
+    let video_url = format!(
+        "{base}{}?token={token}&expiry=9999999999999",
+        pseudo_random(token)
+    );
+    Ok(vec![Video {
+        url: video_url,
+        quality: format!("Doodstream ({})", host_label(&host)),
+        headers: headers(&[("User-Agent", UA), ("Referer", &referer_host)]),
+        ..Default::default()
+    }])
+}
+
+/// A deterministic 10-char alphanumeric nonce (Dood only needs *some* padding;
+/// WASM has no RNG, so we derive it from the token).
+fn pseudo_random(seed: &str) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut h: u64 = 1469598103934665603;
+    for b in seed.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    (0..10)
+        .map(|i| {
+            h = h
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407 + i as u64);
+            ALPHA[(h >> 33) as usize % ALPHA.len()] as char
+        })
+        .collect()
 }
 
 // ---------------- Universal extractor ----------------
