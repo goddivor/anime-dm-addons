@@ -1,0 +1,17 @@
+[package]
+name = "wiflix"
+version = "0.1.0"
+edition = "2021"
+description = "Wiflix source addon for anime-dm"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+addon-api = { workspace = true }
+extism-pdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+scraper = { workspace = true }
+regex = { workspace = true }
+base64 = { workspace = true }
