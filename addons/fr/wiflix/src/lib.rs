@@ -8,7 +8,7 @@ use extism_pdk::*;
 use scraper::{Html, Selector};
 
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const DEFAULT_BASE: &str = "https://fs18.lol";
+const DEFAULT_BASE: &str = "https://flemmix.city";
 const PREF_BASE_URL: &str = "base_url";
 const PREF_LANG: &str = "preferred_lang";
 const LANGS: [&str; 2] = ["vf", "vostfr"];
@@ -40,8 +40,7 @@ fn fetch(url: &str, headers: &[(&str, &str)]) -> Result<String, Error> {
 
 fn get(url: &str) -> Result<String, Error> {
     let referer = base_url();
-    // The site gates content behind a JS challenge that just sets this cookie.
-    fetch(url, &[("Referer", &referer), ("Cookie", "fsschal=1")])
+    fetch(url, &[("Referer", &referer)])
 }
 
 fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -120,11 +119,14 @@ pub fn preferences() -> FnResult<Json<Vec<Preference>>> {
 pub fn anime_details(input: Json<UrlInput>) -> FnResult<Json<Anime>> {
     let html = get(&input.0.url)?;
     let doc = Html::parse_document(&html);
-    let title = attr_text(&doc, "meta[property='og:title']", "content")
-        .or_else(|| first_text(&doc, "h1[itemprop=name], div.mov-title h1, h1"))
+    let title = first_text(&doc, "h1[itemprop=name]")
+        .or_else(|| {
+            attr_text(&doc, "meta[property='og:title']", "content")
+                .map(|t| t.split(" »").next().unwrap_or(&t).trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Wiflix".to_string());
-    let poster_url = attr_text(&doc, "meta[property='og:image']", "content")
-        .or_else(|| attr_text(&doc, "div.fposter img, div.mov-img img, .fpic img", "src"))
+    let poster_url = attr_text(&doc, "#posterimg, .mov-img img, img[itemprop=image]", "src")
         .map(|s| abs_url(&s));
     Ok(Json(Anime {
         url: input.0.url.clone(),
@@ -241,51 +243,24 @@ fn load_html_urls(fragment: &str) -> Vec<String> {
     out
 }
 
-/// Only hosters we can actually decode in `video_list` are worth returning.
-fn is_supported(host: &str) -> bool {
-    const KNOWN: [&str; 14] = [
-        "uqload",
-        "voe.sx",
-        "luluvdo",
-        "lulustream",
-        "filelions",
-        "minochinos",
-        "filemoon",
-        "streamwish",
-        "vido.lol",
-        "vudeo",
-        "upstream",
-        "up4fun",
-        "streamvid",
-        "streamdav",
-    ];
-    KNOWN.iter().any(|k| host.contains(k)) || host.contains("voe")
+/// Hosts known to be dead / ad-only — never worth offering.
+fn is_dead(host: &str) -> bool {
+    const DEAD: [&str; 5] = ["upns.", "hgcloud", "waaw1", "upns.pro", "upns.live"];
+    DEAD.iter().any(|k| host.contains(k))
 }
 
-fn host_label(host: &str) -> &'static str {
-    if host.contains("uqload") {
-        "Uqload"
-    } else if host.contains("voe") {
-        "VOE"
-    } else if host.contains("lulu") {
-        "Lulu"
-    } else if host.contains("filelions") || host.contains("filemoon") || host.contains("minochinos")
-    {
-        "Filemoon"
-    } else if host.contains("streamwish") {
-        "StreamWish"
-    } else if host.contains("vido") {
-        "Vido"
-    } else if host.contains("vudeo") {
-        "Vudeo"
-    } else if host.contains("upstream") || host.contains("up4fun") {
-        "Upstream"
-    } else if host.contains("streamvid") {
-        "StreamVid"
-    } else if host.contains("streamdav") {
-        "StreamDav"
+/// A readable label from the host (second-level domain), e.g. `vidara.to` -> `Vidara`.
+fn host_label(host: &str) -> String {
+    let parts: Vec<&str> = host.trim_start_matches("www.").split('.').collect();
+    let name = if parts.len() >= 2 {
+        parts[parts.len() - 2]
     } else {
-        "Lecteur"
+        host
+    };
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+        None => name.to_string(),
     }
 }
 
@@ -325,12 +300,12 @@ pub fn hoster_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Hoster>>> {
     let mut seen = HashSet::new();
     for (lang, url) in selected {
         let host = host_of(url);
-        if !is_supported(&host) || !seen.insert(url.clone()) {
+        if is_dead(&host) || !seen.insert(url.clone()) {
             continue;
         }
         let name = match lang {
             Some(l) => format!("{} · {}", l.to_uppercase(), host_label(&host)),
-            None => host_label(&host).to_string(),
+            None => host_label(&host),
         };
         out.push(Hoster {
             url: url.clone(),
@@ -342,72 +317,82 @@ pub fn hoster_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Hoster>>> {
 
 #[plugin_fn]
 pub fn video_list(input: Json<Hoster>) -> FnResult<Json<Vec<Video>>> {
-    let hoster = input.0;
-    let host = host_of(&hoster.url);
-    let videos = if host.contains("uqload") {
-        uqload(&hoster.url)?
-    } else if host.contains("voe") {
-        voe(&hoster.url)?
-    } else {
-        generic(&hoster.url)?
-    };
-    Ok(Json(videos))
+    Ok(Json(extract(&input.0.url)?))
 }
 
-// ---------------- Extractors ----------------
+// ---------------- Universal extractor ----------------
 
-fn uqload(url: &str) -> Result<Vec<Video>, Error> {
+/// Host-agnostic: fetch the embed, try VOE's encrypted JSON, then unpack any
+/// packed JS, then grab every `.m3u8`/`.mp4` URL. Covers most embed players
+/// (Uqload, Vidmoly, Lulu, StreamWish, Filemoon, Vido, VOE…) without per-domain
+/// lists — important since these hosts rotate domains constantly.
+fn extract(url: &str) -> Result<Vec<Video>, Error> {
     let host = host_of(url);
-    let html = fetch(url, &[("Referer", &format!("https://{host}/"))])?;
-    let re = regex::Regex::new(r#"sources\s*:\s*\[\s*["']([^"']+\.mp4[^"']*)["']"#).unwrap();
-    let mut out = Vec::new();
-    if let Some(c) = re.captures(&html) {
-        out.push(Video {
-            url: c[1].to_string(),
-            quality: "Uqload".into(),
-            headers: headers(&[("Referer", &format!("https://{host}/"))]),
-            ..Default::default()
-        });
-    }
-    Ok(out)
-}
-
-fn voe(url: &str) -> Result<Vec<Video>, Error> {
-    let mut html = fetch(url, &[])?;
-    if let Some(c) = regex::Regex::new(r#"window\.location\.href\s*=\s*'([^']+)'"#)
+    let referer = format!("https://{host}/");
+    let mut html = fetch(url, &[("Referer", &referer)])?;
+    if let Some(c) = regex::Regex::new(r#"window\.location\.href\s*=\s*['"]([^'"]+)['"]"#)
         .unwrap()
         .captures(&html)
     {
-        html = fetch(&c[1].to_string(), &[])?;
+        if let Ok(h2) = fetch(&c[1].to_string(), &[]) {
+            html = h2;
+        }
     }
-    let doc = Html::parse_document(&html);
-    let sel = Selector::parse(r#"script[type="application/json"]"#).unwrap();
-    let Some(raw) = doc.select(&sel).next().map(|e| e.text().collect::<String>()) else {
-        return Ok(Vec::new());
-    };
-    let encoded = raw.trim().trim_start_matches("[\"").trim_end_matches("\"]");
-    let Some(meta) = voe_decrypt(encoded) else {
-        return Ok(Vec::new());
-    };
-    let h = headers(&[("Referer", "https://voe.sx/")]);
+
+    let label = host_label(&host);
     let mut out = Vec::new();
-    if let Some(src) = meta.get("source").and_then(|v| v.as_str()) {
-        out.push(Video {
-            url: src.to_string(),
-            quality: "VOE HLS".into(),
-            headers: h.clone(),
-            ..Default::default()
-        });
+    let mut seen = HashSet::new();
+
+    // VOE-style: an encrypted JSON <script> payload.
+    if let Some(meta) = voe_from_html(&html) {
+        let vh = headers(&[("Referer", "https://voe.sx/")]);
+        for key in ["source", "direct_access_url"] {
+            if let Some(u) = meta.get(key).and_then(|v| v.as_str()) {
+                if seen.insert(u.to_string()) {
+                    out.push(Video {
+                        url: u.to_string(),
+                        quality: label.clone(),
+                        headers: vh.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        if !out.is_empty() {
+            return Ok(out);
+        }
     }
-    if let Some(mp4) = meta.get("direct_access_url").and_then(|v| v.as_str()) {
-        out.push(Video {
-            url: mp4.to_string(),
-            quality: "VOE MP4".into(),
-            headers: h,
-            ..Default::default()
-        });
+
+    // Raw HTML + any unpacked packed JS.
+    let mut hay = html.clone();
+    let packed_re = regex::Regex::new(r"eval\(function\(p,a,c,k,e,d\).*?\)\)").unwrap();
+    for m in packed_re.find_iter(&html) {
+        if let Some(u) = unpack(m.as_str()) {
+            hay.push('\n');
+            hay.push_str(&u);
+        }
+    }
+    let url_re = regex::Regex::new(r#"https?://[^\s"'\\<>]+\.(?:m3u8|mp4)[^\s"'\\<>]*"#).unwrap();
+    for m in url_re.find_iter(&hay) {
+        let u = m.as_str().to_string();
+        if seen.insert(u.clone()) {
+            out.push(Video {
+                url: u,
+                quality: label.clone(),
+                headers: headers(&[("Referer", &referer)]),
+                ..Default::default()
+            });
+        }
     }
     Ok(out)
+}
+
+fn voe_from_html(html: &str) -> Option<serde_json::Value> {
+    let doc = Html::parse_document(html);
+    let sel = Selector::parse(r#"script[type="application/json"]"#).ok()?;
+    let raw = doc.select(&sel).next().map(|e| e.text().collect::<String>())?;
+    let encoded = raw.trim().trim_start_matches("[\"").trim_end_matches("\"]");
+    voe_decrypt(encoded)
 }
 
 fn voe_decrypt(input: &str) -> Option<serde_json::Value> {
@@ -431,40 +416,6 @@ fn voe_decrypt(input: &str) -> Option<serde_json::Value> {
     let reversed: Vec<u8> = shifted.into_iter().rev().collect();
     let step2 = b64.decode(&reversed).ok()?;
     serde_json::from_slice(&step2).ok()
-}
-
-/// Generic extractor: fetch the embed, unpack any packed JS, then grab the
-/// first `.m3u8`/`.mp4` URL. Covers the StreamWish/Filemoon/Lulu/Vido family.
-fn generic(url: &str) -> Result<Vec<Video>, Error> {
-    let host = host_of(url);
-    let referer = format!("https://{host}/");
-    let html = fetch(url, &[("Referer", &referer)])?;
-
-    let mut haystack = html.clone();
-    let packed_re = regex::Regex::new(r"eval\(function\(p,a,c,k,e,d\).*?\)\)").unwrap();
-    for m in packed_re.find_iter(&html) {
-        if let Some(unpacked) = unpack(m.as_str()) {
-            haystack.push('\n');
-            haystack.push_str(&unpacked);
-        }
-    }
-
-    let url_re =
-        regex::Regex::new(r#"https?://[^\s"'\\<>]+\.(?:m3u8|mp4)[^\s"'\\<>]*"#).unwrap();
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for m in url_re.find_iter(&haystack) {
-        let u = m.as_str().to_string();
-        if seen.insert(u.clone()) {
-            out.push(Video {
-                url: u,
-                quality: host_label(&host).into(),
-                headers: headers(&[("Referer", &referer)]),
-                ..Default::default()
-            });
-        }
-    }
-    Ok(out)
 }
 
 /// Dean Edwards' p.a.c.k.e.d unpacker.
