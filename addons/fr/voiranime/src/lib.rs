@@ -14,15 +14,7 @@ const PREF_PLAYER: &str = "preferred_player";
 const PREF_QUALITY: &str = "quality";
 const AUTO: &str = "Auto";
 
-const PLAYERS: [&str; 7] = [
-    "LECTEUR myTV",
-    "LECTEUR Stape",
-    "LECTEUR VOE",
-    "LECTEUR FHD1",
-    "LECTEUR MOON",
-    "LECTEUR SB",
-    "LECTEUR YU",
-];
+const PLAYERS: [&str; 4] = ["LECTEUR myTV", "LECTEUR Stape", "LECTEUR VOE", "LECTEUR FHD1"];
 
 const QUALITIES: [&str; 4] = ["Auto", "1080", "720", "480"];
 
@@ -56,6 +48,14 @@ fn get(url: &str) -> Result<String, Error> {
 
 fn host_of(url: &str) -> String {
     url.split('/').nth(2).unwrap_or(url).to_lowercase()
+}
+
+/// Only hosters we can actually decode in `video_list` are worth returning.
+fn is_supported(host: &str) -> bool {
+    host.contains("vidmoly")
+        || host.contains("streamtape")
+        || host.contains("mail.ru")
+        || host.contains("voe")
 }
 
 fn abs_url(s: &str) -> String {
@@ -460,10 +460,10 @@ fn parse_hosters(html: &str) -> Vec<Hoster> {
     let mut hosters = Vec::new();
     for (name, iframe_html) in map {
         if let Some(c) = src_re.captures(&iframe_html) {
-            hosters.push(Hoster {
-                url: abs_url(&c[1]),
-                name,
-            });
+            let url = abs_url(&c[1]);
+            if is_supported(&host_of(&url)) {
+                hosters.push(Hoster { url, name });
+            }
         }
     }
     hosters
