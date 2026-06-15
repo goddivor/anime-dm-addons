@@ -12,11 +12,15 @@ const DEFAULT_BASE: &str = "https://voir-anime.to";
 const PREF_BASE_URL: &str = "base_url";
 const PREF_PLAYER: &str = "preferred_player";
 const PREF_QUALITY: &str = "quality";
+const PREF_COVER: &str = "cover_source";
 const AUTO: &str = "Auto";
+const COVER_VA: &str = "Voir-Anime";
+const COVER_MAL: &str = "MAL";
 
 const PLAYERS: [&str; 4] = ["LECTEUR myTV", "LECTEUR Stape", "LECTEUR VOE", "LECTEUR FHD1"];
 
 const QUALITIES: [&str; 4] = ["Auto", "1080", "720", "480"];
+const COVERS: [&str; 2] = [COVER_VA, COVER_MAL];
 
 fn cfg(key: &str) -> Option<String> {
     config::get(key).ok().flatten().filter(|s| !s.is_empty())
@@ -44,6 +48,35 @@ fn fetch(url: &str, headers: &[(&str, &str)]) -> Result<String, Error> {
 fn get(url: &str) -> Result<String, Error> {
     let referer = base_url();
     fetch(url, &[("Referer", &referer)])
+}
+
+/// Extract the Voir-Anime slug from an anime URL (`.../anime/<slug>/`).
+fn slug_from_url(url: &str) -> Option<String> {
+    let after = url.split("/anime/").nth(1)?;
+    let slug = after.trim_start_matches('/').split('/').next()?.trim();
+    (!slug.is_empty()).then(|| slug.to_string())
+}
+
+/// Resolve the MAL cover for a Voir-Anime URL: slug -> nijihub mal_id -> Jikan image.
+/// Returns `None` (caller keeps the site poster) on any failure.
+fn mal_cover(url: &str) -> Option<String> {
+    let slug = slug_from_url(url)?;
+    let nh = fetch(
+        &format!("https://api.nijihub.com/api/v1/id-map/lookup?va_slug={slug}"),
+        &[],
+    )
+    .ok()?;
+    let nv: serde_json::Value = serde_json::from_str(&nh).ok()?;
+    let mal_id = nv["data"].get(0)?.get("mal_id")?.as_i64()?;
+
+    let jk = fetch(&format!("https://api.jikan.moe/v4/anime/{mal_id}"), &[]).ok()?;
+    let jv: serde_json::Value = serde_json::from_str(&jk).ok()?;
+    let images = &jv["data"]["images"];
+    images["jpg"]["large_image_url"]
+        .as_str()
+        .or_else(|| images["jpg"]["image_url"].as_str())
+        .or_else(|| images["webp"]["large_image_url"].as_str())
+        .map(|s| s.to_string())
 }
 
 fn host_of(url: &str) -> String {
@@ -107,13 +140,29 @@ pub fn preferences() -> FnResult<Json<Vec<Preference>>> {
             kind: PreferenceKind::Select,
             options: QUALITIES.iter().map(|s| s.to_string()).collect(),
         },
+        Preference {
+            key: PREF_COVER.into(),
+            title: "Source de l'affiche".into(),
+            summary: Some(
+                "« MAL » récupère l'affiche depuis MyAnimeList (via nijihub + Jikan).".into(),
+            ),
+            default: COVER_VA.into(),
+            kind: PreferenceKind::Select,
+            options: COVERS.iter().map(|s| s.to_string()).collect(),
+        },
     ]))
 }
 
 #[plugin_fn]
 pub fn anime_details(input: Json<UrlInput>) -> FnResult<Json<Anime>> {
     let html = get(&input.0.url)?;
-    Ok(Json(parse_anime(&html, &input.0.url)))
+    let mut anime = parse_anime(&html, &input.0.url);
+    if cfg(PREF_COVER).as_deref() == Some(COVER_MAL) {
+        if let Some(cover) = mal_cover(&input.0.url) {
+            anime.poster_url = Some(cover);
+        }
+    }
+    Ok(Json(anime))
 }
 
 #[plugin_fn]
