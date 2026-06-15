@@ -49,3 +49,7 @@ done < <(find "$ROOT/addons" -name addon.json)
 } > "$OUT/index.min.json"
 
 echo "wrote $OUT/index.min.json (${#entries[@]} addon(s))"
+
+# Repo metadata + icon (optional, shown in the app's repo list)
+[ -f "$ROOT/repo.json" ] && cp "$ROOT/repo.json" "$OUT/repo.json" && echo "copied repo.json"
+[ -f "$ROOT/repo-icon.png" ] && cp "$ROOT/repo-icon.png" "$OUT/repo-icon.png" && echo "copied repo-icon.png"
