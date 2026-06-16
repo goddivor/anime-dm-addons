@@ -164,8 +164,12 @@ pub fn anime_details(input: Json<UrlInput>) -> FnResult<Json<Anime>> {
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "FrenchStream".to_string());
-    let poster_url = attr_text(&doc, "div.fimg img, .short-poster img, img[itemprop=image]", "src")
-        .map(|s| abs_url(&s));
+    let poster_url = attr_text(
+        &doc,
+        ".fposter img, img.dvd-thumbnail, div.fimg img, .short-poster img, img[itemprop=image]",
+        "src",
+    )
+    .map(|s| abs_url(&s));
     let description = first_text(&doc, "span[id^='desc-'], .fdesc");
     let genres: Vec<String> = {
         let mut out = Vec::new();
