@@ -1,10 +1,11 @@
+use std::ffi::c_char;
 use std::collections::{BTreeMap, HashSet};
 
 use addon_api::{
     Anime, AnimesPage, Episode, Hoster, Metadata, PageInput, Preference, PreferenceKind,
     SearchInput, UrlInput, Video,
 };
-use extism_pdk::*;
+use adm_abi::{answer, answer_with, Error, Json, Result};
 use scraper::{Html, Selector};
 
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -14,7 +15,7 @@ const PREF_LANG: &str = "preferred_lang";
 const LANGS: [&str; 2] = ["vf", "vostfr"];
 
 fn cfg(key: &str) -> Option<String> {
-    config::get(key).ok().flatten().filter(|s| !s.is_empty())
+    adm_abi::config(key)
 }
 
 fn base_url() -> String {
@@ -28,14 +29,9 @@ fn pref_lang() -> String {
 }
 
 fn fetch(url: &str, headers: &[(&str, &str)]) -> Result<String, Error> {
-    let mut req = HttpRequest::new(url)
-        .with_method("GET")
-        .with_header("User-Agent", UA);
-    for (k, v) in headers {
-        req = req.with_header(*k, *v);
-    }
-    let res = http::request::<()>(&req, None)?;
-    Ok(String::from_utf8_lossy(&res.body()).into_owned())
+    let mut all = vec![("User-Agent", UA)];
+    all.extend_from_slice(headers);
+    adm_abi::http_get(url, &all)
 }
 
 fn get(url: &str) -> Result<String, Error> {
@@ -81,8 +77,7 @@ fn first_text(doc: &Html, sel: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-#[plugin_fn]
-pub fn metadata() -> FnResult<Json<Metadata>> {
+fn metadata() -> Result<Json<Metadata>> {
     Ok(Json(Metadata {
         id: "fr.wiflix".into(),
         name: "Wiflix".into(),
@@ -93,8 +88,7 @@ pub fn metadata() -> FnResult<Json<Metadata>> {
     }))
 }
 
-#[plugin_fn]
-pub fn preferences() -> FnResult<Json<Vec<Preference>>> {
+fn preferences() -> Result<Json<Vec<Preference>>> {
     Ok(Json(vec![
         Preference {
             key: PREF_BASE_URL.into(),
@@ -115,8 +109,7 @@ pub fn preferences() -> FnResult<Json<Vec<Preference>>> {
     ]))
 }
 
-#[plugin_fn]
-pub fn anime_details(input: Json<UrlInput>) -> FnResult<Json<Anime>> {
+fn anime_details(input: Json<UrlInput>) -> Result<Json<Anime>> {
     let html = get(&input.0.url)?;
     let doc = Html::parse_document(&html);
     let title = first_text(&doc, "h1[itemprop=name]")
@@ -157,8 +150,7 @@ fn load_urls(doc: &Html, selector: &str) -> Vec<String> {
     out
 }
 
-#[plugin_fn]
-pub fn episode_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Episode>>> {
+fn episode_list(input: Json<UrlInput>) -> Result<Json<Vec<Episode>>> {
     let html = get(&input.0.url)?;
     let doc = Html::parse_document(&html);
 
@@ -264,8 +256,7 @@ fn host_label(host: &str) -> String {
     }
 }
 
-#[plugin_fn]
-pub fn hoster_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Hoster>>> {
+fn hoster_list(input: Json<UrlInput>) -> Result<Json<Vec<Hoster>>> {
     // `input.url` is the encoded player list produced by `episode_list`:
     // "vf#url,vf#url,vostfr#url" (series) or "url,url" (film).
     let entries: Vec<(Option<String>, String)> = input
@@ -315,8 +306,7 @@ pub fn hoster_list(input: Json<UrlInput>) -> FnResult<Json<Vec<Hoster>>> {
     Ok(Json(out))
 }
 
-#[plugin_fn]
-pub fn video_list(input: Json<Hoster>) -> FnResult<Json<Vec<Video>>> {
+fn video_list(input: Json<Hoster>) -> Result<Json<Vec<Video>>> {
     let url = input.0.url;
     let host = host_of(&url);
     let videos = if is_dood(&host) {
@@ -517,17 +507,75 @@ fn decode_base(s: &str, radix: usize) -> Option<usize> {
     Some(n)
 }
 
-#[plugin_fn]
-pub fn popular(_input: Json<PageInput>) -> FnResult<Json<AnimesPage>> {
+fn popular(_input: Json<PageInput>) -> Result<Json<AnimesPage>> {
     Ok(Json(AnimesPage::default()))
 }
 
-#[plugin_fn]
-pub fn latest(_input: Json<PageInput>) -> FnResult<Json<AnimesPage>> {
+fn latest(_input: Json<PageInput>) -> Result<Json<AnimesPage>> {
     Ok(Json(AnimesPage::default()))
 }
 
-#[plugin_fn]
-pub fn search(_input: Json<SearchInput>) -> FnResult<Json<AnimesPage>> {
+fn search(_input: Json<SearchInput>) -> Result<Json<AnimesPage>> {
     Ok(Json(AnimesPage::default()))
+}
+
+// --- C entry points ---------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn adm_metadata() -> *mut c_char {
+    answer(metadata)
+}
+
+#[no_mangle]
+pub extern "C" fn adm_preferences() -> *mut c_char {
+    answer(preferences)
+}
+
+/// # Safety
+/// The host passes a NUL-terminated JSON argument.
+#[no_mangle]
+pub unsafe extern "C" fn adm_anime_details(input: *const c_char) -> *mut c_char {
+    answer_with(input, anime_details)
+}
+
+/// # Safety
+/// The host passes a NUL-terminated JSON argument.
+#[no_mangle]
+pub unsafe extern "C" fn adm_episode_list(input: *const c_char) -> *mut c_char {
+    answer_with(input, episode_list)
+}
+
+/// # Safety
+/// The host passes a NUL-terminated JSON argument.
+#[no_mangle]
+pub unsafe extern "C" fn adm_hoster_list(input: *const c_char) -> *mut c_char {
+    answer_with(input, hoster_list)
+}
+
+/// # Safety
+/// The host passes a NUL-terminated JSON argument.
+#[no_mangle]
+pub unsafe extern "C" fn adm_video_list(input: *const c_char) -> *mut c_char {
+    answer_with(input, video_list)
+}
+
+/// # Safety
+/// The host passes a NUL-terminated JSON argument.
+#[no_mangle]
+pub unsafe extern "C" fn adm_popular(input: *const c_char) -> *mut c_char {
+    answer_with(input, popular)
+}
+
+/// # Safety
+/// The host passes a NUL-terminated JSON argument.
+#[no_mangle]
+pub unsafe extern "C" fn adm_latest(input: *const c_char) -> *mut c_char {
+    answer_with(input, latest)
+}
+
+/// # Safety
+/// The host passes a NUL-terminated JSON argument.
+#[no_mangle]
+pub unsafe extern "C" fn adm_search(input: *const c_char) -> *mut c_char {
+    answer_with(input, search)
 }

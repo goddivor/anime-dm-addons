@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Build every addon to WASM and assemble a publishable repo/ directory:
+# Build every addon to a native Windows library and assemble a publishable repo/:
 #   repo/index.min.json        — the store index the app fetches
-#   repo/<id>/addon.wasm       — the addon module
+#   repo/<id>/addon.dll        — the addon library
 #   repo/<id>/icon.png         — the source icon (optional)
 #
 # Publish `repo/` (e.g. push to a `repo` branch) and point the app at the raw
 # URL of repo/index.min.json.
+#
+# Runs where the MinGW toolchain lives: Git Bash on Windows, or Linux with the
+# x86_64-w64-mingw32 linker installed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/repo"
-TARGET="wasm32-unknown-unknown"
+TARGET="x86_64-pc-windows-gnu"
+ABI=1
 
 rustup target add "$TARGET" >/dev/null 2>&1 || true
 cargo build --release --target "$TARGET" --manifest-path "$ROOT/Cargo.toml"
@@ -27,11 +31,16 @@ while IFS= read -r meta; do
   nsfw="$(grep -oP '"nsfw"\s*:\s*\K(true|false)' "$meta" || echo false)"
   crate="$(grep -oP '^name\s*=\s*"\K[^"]+' "$dir/Cargo.toml")"
   version="$(grep -oP '^version\s*=\s*"\K[^"]+' "$dir/Cargo.toml")"
-  wasm="$ROOT/target/$TARGET/release/${crate}.wasm"
 
-  [ -f "$wasm" ] || { echo "missing wasm for $id ($wasm)"; exit 1; }
+  built="$ROOT/target/$TARGET/release/${crate}.dll"
+  [ -f "$built" ] || built="$ROOT/target/$TARGET/release/lib${crate}.dll"
+  [ -f "$built" ] || { echo "missing library for $id (${crate}.dll)"; exit 1; }
+
   mkdir -p "$OUT/$id"
-  cp "$wasm" "$OUT/$id/addon.wasm"
+  cp "$built" "$OUT/$id/addon.dll"
+  # The index is served over HTTPS from the author's repo; the digest guards
+  # against a swapped artifact, since the host loads native code.
+  sha="$(sha256sum "$OUT/$id/addon.dll" | cut -d' ' -f1)"
 
   icon_field=""
   if [ -f "$dir/icon.png" ]; then
@@ -39,7 +48,7 @@ while IFS= read -r meta; do
     icon_field=", \"icon\": \"$id/icon.png\""
   fi
 
-  entries+=("{\"id\":\"$id\",\"name\":\"$name\",\"lang\":\"$lang\",\"version\":\"$version\",\"nsfw\":$nsfw,\"wasm\":\"$id/addon.wasm\"$icon_field}")
+  entries+=("{\"id\":\"$id\",\"name\":\"$name\",\"lang\":\"$lang\",\"version\":\"$version\",\"nsfw\":$nsfw,\"abi\":$ABI,\"dll\":\"$id/addon.dll\",\"sha256\":\"$sha\"$icon_field}")
 done < <(find "$ROOT/addons" -name addon.json)
 
 {
