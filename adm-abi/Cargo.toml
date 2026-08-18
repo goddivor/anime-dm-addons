@@ -1,0 +1,10 @@
+[package]
+name = "adm-abi"
+version = "0.1.0"
+edition = "2021"
+description = "C ABI layer between the anime-dm Win32 host and its native source addons"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
