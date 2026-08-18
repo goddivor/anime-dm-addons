@@ -166,14 +166,18 @@ fn envelope<T: Serialize>(result: Result<T>) -> *mut c_char {
         .into_raw()
 }
 
+/// Carries the payload of an entry point, mirroring the wrapper the addons were
+/// already written against so their bodies need no change.
+pub struct Json<T>(pub T);
+
 /// Runs an entry point that takes no argument, turning a panic into an error.
 pub fn answer<O, F>(body: F) -> *mut c_char
 where
     O: Serialize,
-    F: FnOnce() -> Result<O>,
+    F: FnOnce() -> Result<Json<O>>,
 {
     match catch_unwind(AssertUnwindSafe(body)) {
-        Ok(result) => envelope(result),
+        Ok(result) => envelope(result.map(|value| value.0)),
         Err(_) => envelope::<()>(Err(anyhow!("the addon panicked"))),
     }
 }
@@ -186,7 +190,7 @@ pub unsafe fn answer_with<I, O, F>(input: *const c_char, body: F) -> *mut c_char
 where
     I: DeserializeOwned,
     O: Serialize,
-    F: FnOnce(I) -> Result<O>,
+    F: FnOnce(Json<I>) -> Result<Json<O>>,
 {
     let Some(text) = borrow(input) else {
         return envelope::<()>(Err(anyhow!("missing argument")));
@@ -195,5 +199,5 @@ where
         Ok(value) => value,
         Err(error) => return envelope::<()>(Err(anyhow!("invalid argument: {error}"))),
     };
-    answer(move || body(parsed))
+    answer(move || body(Json(parsed)))
 }
