@@ -14,7 +14,12 @@ const DEFAULT_BASE: &str = "https://french-stream.one";
 const CHAL_COOKIE: &str = "fsschal=1";
 const PREF_BASE_URL: &str = "base_url";
 const PREF_LANG: &str = "preferred_lang";
+const PREF_PLAYER: &str = "preferred_player";
 const LANGS: [&str; 2] = ["vf", "vostfr"];
+// Lecteur essayé en premier. « AUTO » = ordre du site. La correspondance est
+// insensible à la casse et par sous-chaîne, donc « Uqload » matche « VF · Uqload ».
+const AUTO: &str = "AUTO";
+const PLAYERS: [&str; 4] = ["Uqload", "Vidzy", "Fsvid", "Voe"];
 
 fn cfg(key: &str) -> Option<String> {
     adm_abi::config(key)
@@ -143,6 +148,18 @@ fn preferences() -> Result<Json<Vec<Preference>>> {
             default: "vf".into(),
             kind: PreferenceKind::Select,
             options: LANGS.iter().map(|s| s.to_string()).collect(),
+        },
+        Preference {
+            key: PREF_PLAYER.into(),
+            title: "Lecteur préféré".into(),
+            summary: Some("Lecteur essayé en premier (Vidzy/Fsvid = VidHide).".into()),
+            default: AUTO.into(),
+            kind: PreferenceKind::Select,
+            options: {
+                let mut o = vec![AUTO.to_string()];
+                o.extend(PLAYERS.iter().map(|s| s.to_string()));
+                o
+            },
         },
     ]))
 }
@@ -421,6 +438,15 @@ fn hoster_list(input: Json<UrlInput>) -> Result<Json<Vec<Hoster>>> {
             url: url.clone(),
             name,
         });
+    }
+    // Lecteur préféré : on remonte en tête le premier hoster qui correspond
+    // (l'app essaie les hosters dans l'ordre reçu).
+    if let Some(pref) = cfg(PREF_PLAYER).filter(|p| p != AUTO && !p.is_empty()) {
+        let pl = pref.to_lowercase();
+        if let Some(i) = out.iter().position(|h| h.name.to_lowercase().contains(&pl)) {
+            let chosen = out.remove(i);
+            out.insert(0, chosen);
+        }
     }
     Ok(Json(out))
 }
