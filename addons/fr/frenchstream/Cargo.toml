@@ -1,6 +1,6 @@
 [package]
 name = "frenchstream"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "FrenchStream source addon for anime-dm"
 

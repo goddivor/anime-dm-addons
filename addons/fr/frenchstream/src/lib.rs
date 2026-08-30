@@ -512,6 +512,123 @@ fn pseudo_random(seed: &str) -> String {
 /// Host-agnostic: fetch the embed, try VOE's encrypted JSON, then unpack any
 /// packed JS, then grab every `.m3u8`/`.mp4` URL. Covers Uqload, VOE, VidHide
 /// (Vidzy/fsvid/premium) and Filemoon (netu) without per-domain lists.
+/// Marqueurs de la playlist « leurre » servie quand le fichier a ete retire de
+/// l'hebergeur. On ne joue jamais ces URLs (elles donnent ~18 s de video).
+fn is_decoy_url(u: &str) -> bool {
+    let l = u.to_lowercase();
+    ["/troll/", "/fake/", "/preview/"].iter().any(|m| l.contains(m))
+}
+
+/// Tranche bornee, ajustee a une frontiere de caractere (evite un panic).
+fn bounded_slice(s: &str, start: usize, max_len: usize) -> &str {
+    let mut end = s.len().min(start + max_len);
+    while end > start && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[start..end]
+}
+
+fn base64_decode(b64: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).ok()
+}
+
+/// VidHide, format d'aout 2026 : base64 -> chaine inversee -> XOR avec une cle
+/// CALCULEE `(base + i*pas [+ H]) & 255`, ou H est la somme des codes du nom de
+/// domaine de la page (lie le dechiffrement a l'hote du lecteur). Les constantes
+/// changent d'un deploiement a l'autre : on les lit dans le script. Meme
+/// algorithme que le proxy Stremio (ownproxy/launcher.js `decodeRollingXor`).
+fn decode_rolling_xor(script: &str, hostname: &str) -> Option<String> {
+    let re = regex::Regex::new(
+        r#"atob\(s\)[\s\S]{0,300}?\(\s*(0x[0-9a-fA-F]+|\d+)\s*\+\s*i\s*\*\s*(\d+)\s*(\+\s*\w+\s*)?\)\s*&\s*255[\s\S]{0,500}?\}\)\(\s*"([A-Za-z0-9+/=]+)"\s*\)"#,
+    )
+    .ok()?;
+    let caps = re.captures(script)?;
+
+    let base_s = caps.get(1)?.as_str();
+    let base: i64 = if base_s.len() > 2 && base_s[..2].eq_ignore_ascii_case("0x") {
+        i64::from_str_radix(&base_s[2..], 16).ok()?
+    } else {
+        base_s.parse().ok()?
+    };
+    let step: i64 = caps.get(2)?.as_str().parse().ok()?;
+
+    let m_start = caps.get(0)?.start();
+
+    // H = somme des codes du hostname, seulement si le script l'ajoute vraiment.
+    let mut host_sum: i64 = 0;
+    if caps.get(3).is_some() && script[..m_start].contains("hostname") {
+        if hostname.is_empty() {
+            return None;
+        }
+        for b in hostname.bytes() {
+            host_sum = (host_sum + b as i64) & 255;
+        }
+    }
+
+    let reversed = bounded_slice(script, m_start, 300).contains(".reverse()");
+
+    let raw = base64_decode(caps.get(4)?.as_str())?;
+    let bytes: Vec<u8> = if reversed { raw.into_iter().rev().collect() } else { raw };
+
+    let mut out = String::new();
+    for (i, b) in bytes.iter().enumerate() {
+        let k = ((base + (i as i64) * step + host_sum) & 255) as u8;
+        out.push((b ^ k) as char);
+    }
+    if (out.starts_with("http://") || out.starts_with("https://")) && !is_decoy_url(&out) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// VidHide, format de juillet 2026 : base64 puis XOR avec une cle fixe d'octets.
+fn decode_xor_source(script: &str) -> Option<String> {
+    let re = regex::Regex::new(
+        r#"var\s+k=\[([\d,\s]+)\][\s\S]{0,400}?\}\)\(\s*"([A-Za-z0-9+/=]+)"\s*\)"#,
+    )
+    .ok()?;
+    let caps = re.captures(script)?;
+    let key: Vec<u8> = caps
+        .get(1)?
+        .as_str()
+        .split(',')
+        .filter_map(|s| s.trim().parse::<u8>().ok())
+        .collect();
+    if key.is_empty() {
+        return None;
+    }
+    let bytes = base64_decode(caps.get(2)?.as_str())?;
+    let mut out = String::new();
+    for (i, b) in bytes.iter().enumerate() {
+        out.push((b ^ key[i % key.len()]) as char);
+    }
+    if (out.starts_with("http://") || out.starts_with("https://")) && !is_decoy_url(&out) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Renvoie le HTML augmente de tout JS p.a.c.k.e.d depaquete. Les lecteurs
+/// VidHide et Filemoon cachent l'URL (ou le script qui la reconstruit) dans ce
+/// JS obfusque, donc il faut le depaqueter avant toute detection.
+fn unpack_all(html: &str) -> String {
+    let mut out = html.to_string();
+    if let Ok(re) = regex::Regex::new(
+        r"\}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\.split\('\|'\)",
+    ) {
+        for cap in re.captures_iter(html) {
+            if let Some(u) = decode_packed(&cap[1], &cap[2], &cap[4]) {
+                out.push('\n');
+                out.push_str(&u);
+            }
+        }
+    }
+    out
+}
+
 fn extract(url: &str) -> Result<Vec<Video>, Error> {
     let host = host_of(url);
     let referer = embed_referer(&host);
@@ -549,28 +666,48 @@ fn extract(url: &str) -> Result<Vec<Video>, Error> {
         }
     }
 
-    // Raw HTML + any unpacked p.a.c.k.e.d JS. We match the packer's argument
-    // tail (`}('payload',radix,count,'words'.split('|')`) directly on the HTML —
-    // pre-isolating the `eval(function(p,a,c,k,e,d)...)` wrapper is unreliable
-    // because its body contains nested `))` that truncate a non-greedy match.
-    let mut hay = html.clone();
-    let packed_re = regex::Regex::new(
-        r"\}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\.split\('\|'\)",
-    )
-    .unwrap();
-    for cap in packed_re.captures_iter(&html) {
-        if let Some(u) = decode_packed(&cap[1], &cap[2], &cap[4]) {
-            hay.push('\n');
-            hay.push_str(&u);
+    // Depaquetage une fois pour toutes : le script VidHide (et Filemoon) est
+    // cache dans du JS p.a.c.k.e.d.
+    let script = unpack_all(&html);
+
+    // VidHide (Vidzy / fsvid / premium) : le vrai m3u8 n'est pas en clair, il est
+    // reconstruit a l'execution par un script obfusque. On le decode nous-memes.
+    // L'extraction tourne sur l'appareil (meme IP que la lecture), donc pas de
+    // proxy : la vraie playlist se lit en direct. En-tetes indispensables :
+    // Referer de l'embed + Sec-Fetch-Site: cross-site (sinon le CDN repond 403
+    // ou sert le leurre).
+    if let Some(master) = decode_rolling_xor(&script, &host).or_else(|| decode_xor_source(&script)) {
+        let embed_ref = format!("https://{host}/");
+        let embed_origin = format!("https://{host}");
+        let mut pairs: Vec<(&str, &str)> = vec![
+            ("User-Agent", UA),
+            ("Referer", embed_ref.as_str()),
+            ("Origin", embed_origin.as_str()),
+            ("Sec-Fetch-Site", "cross-site"),
+            ("Sec-Fetch-Mode", "cors"),
+            ("Sec-Fetch-Dest", "empty"),
+        ];
+        if is_fs_host(&host) {
+            pairs.push(("Cookie", CHAL_COOKIE));
         }
+        return Ok(vec![Video {
+            url: master,
+            quality: label.clone(),
+            headers: headers(&pairs),
+            ..Default::default()
+        }]);
     }
+
+    // Repli generique : toute URL .m3u8/.mp4 en clair dans le script depaquete
+    // (couvre Uqload, Filemoon deja depaquete, etc.).
+    let hay = &script;
     let vid_headers = if is_fs_host(&host) {
         headers(&[("User-Agent", UA), ("Referer", &referer), ("Cookie", CHAL_COOKIE)])
     } else {
         headers(&[("User-Agent", UA), ("Referer", &referer)])
     };
     let url_re = regex::Regex::new(r#"https?://[^\s"'\\<>]+\.(?:m3u8|mp4)[^\s"'\\<>]*"#).unwrap();
-    for m in url_re.find_iter(&hay) {
+    for m in url_re.find_iter(hay) {
         let u = m.as_str().to_string();
         if seen.insert(u.clone()) {
             out.push(Video {
