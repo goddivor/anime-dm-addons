@@ -9,8 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 addon-api = { workspace = true }
-adm-abi = { workspace = true }
-anyhow = { workspace = true }
+extism-pdk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 scraper = { workspace = true }

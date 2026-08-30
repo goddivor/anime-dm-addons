@@ -1,8 +1,0 @@
-[package]
-name = "addon-api"
-version = "0.1.0"
-edition = "2021"
-description = "Shared contract (models + function names) between the anime-dm host and its source addons"
-
-[dependencies]
-serde = { version = "1", features = ["derive"] }

@@ -1,13 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["addon-api", "adm-abi", "addons/*/*"]
+members = ["addons/*/*"]
 
-# Le contrat partagé et la couche ABI vivent ici : l'application Win32 est en C++
-# et ne consomme aucun type Rust, elle ne parle que JSON.
+# `addon-api` est le contrat partagé : il vit dans le repo de l'app (anime-dm) et
+# est référencé par chemin (les deux repos sont côte à côte sous rust-project/).
 [workspace.dependencies]
-addon-api = { path = "addon-api" }
-adm-abi = { path = "adm-abi" }
-anyhow = "1"
+addon-api = { path = "../anime-dm/src-tauri/addon-api" }
+extism-pdk = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 scraper = "0.27"
