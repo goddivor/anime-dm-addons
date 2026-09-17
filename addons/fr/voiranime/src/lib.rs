@@ -85,14 +85,10 @@ fn host_of(url: &str) -> String {
 
 /// Only hosters we can actually decode in `video_list` are worth returning.
 fn is_supported(host: &str) -> bool {
-    is_moly(host) || host.contains("streamtape") || host.contains("mail.ru") || host.contains("voe")
-}
-
-/// The "myTV" player lives on voembed.net, a vidmoly clone: same page, same
-/// player, only the domain differs. Its name contains "voe", so it has to be
-/// told apart from VOE before the hosts are matched.
-fn is_moly(host: &str) -> bool {
-    host.contains("vidmoly") || host.contains("voembed")
+    host.contains("vidmoly")
+        || host.contains("streamtape")
+        || host.contains("mail.ru")
+        || host.contains("voe")
 }
 
 fn abs_url(s: &str) -> String {
@@ -207,7 +203,7 @@ pub fn search(_input: Json<SearchInput>) -> FnResult<Json<AnimesPage>> {
 pub fn video_list(input: Json<Hoster>) -> FnResult<Json<Vec<Video>>> {
     let hoster = input.0;
     let host = host_of(&hoster.url);
-    let videos = if is_moly(&host) {
+    let videos = if host.contains("vidmoly") {
         vidmoly(&hoster.url)?
     } else if host.contains("streamtape") {
         streamtape(&hoster.url)?
@@ -229,11 +225,10 @@ fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 fn vidmoly(url: &str) -> Result<Vec<Video>, Error> {
-    // The CDN checks that the request comes from the embed's own domain,
-    // whichever clone of the player is serving it.
-    let origin = format!("https://{}", host_of(url));
-    let referer = format!("{origin}/");
-    let html = fetch(url, &[("Referer", &referer), ("Origin", &origin)])?;
+    let html = fetch(
+        url,
+        &[("Referer", "https://vidmoly.biz/"), ("Origin", "https://vidmoly.biz")],
+    )?;
     let re = regex::Regex::new(r#"file\s*:\s*["']([^"']+\.m3u8[^"']*)["']"#).unwrap();
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -243,7 +238,10 @@ fn vidmoly(url: &str) -> Result<Vec<Video>, Error> {
             out.push(Video {
                 url: u,
                 quality: "auto".into(),
-                headers: headers(&[("Referer", &referer), ("Origin", &origin)]),
+                headers: headers(&[
+                    ("Referer", "https://vidmoly.biz/"),
+                    ("Origin", "https://vidmoly.biz"),
+                ]),
                 ..Default::default()
             });
         }
