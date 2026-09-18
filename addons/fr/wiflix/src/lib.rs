@@ -85,6 +85,9 @@ fn metadata() -> Result<Json<Metadata>> {
         base_url: base_url(),
         version: env!("CARGO_PKG_VERSION").into(),
         nsfw: false,
+        anime_pattern: r"/\d+-[^/]+\.html".into(),
+        episode_pattern: String::new(),
+        anime_from_episode: String::new(),
     }))
 }
 

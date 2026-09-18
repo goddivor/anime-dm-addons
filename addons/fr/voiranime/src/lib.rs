@@ -107,6 +107,9 @@ fn metadata() -> Result<Json<Metadata>> {
         base_url: base_url(),
         version: env!("CARGO_PKG_VERSION").into(),
         nsfw: false,
+        anime_pattern: r"^/anime/[^/]+/?$".into(),
+        episode_pattern: r"^(/anime/[^/]+/)[^/]+/?$".into(),
+        anime_from_episode: "$1".into(),
     }))
 }
 

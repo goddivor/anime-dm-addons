@@ -31,6 +31,18 @@ pub struct Metadata {
     pub version: String,
     #[serde(default)]
     pub nsfw: bool,
+    /// A regular expression (JavaScript flavour) that recognises the path and
+    /// query of an anime page on the site; empty when any page may be one.
+    #[serde(default)]
+    pub anime_pattern: String,
+    /// The same for an episode page, with a capture group that the browser
+    /// extension turns into the anime page through `anime_from_episode`.
+    #[serde(default)]
+    pub episode_pattern: String,
+    /// The replacement applied to a matched episode path to get the anime
+    /// page (`$1` and friends), empty when episode pages are not recognised.
+    #[serde(default)]
+    pub anime_from_episode: String,
 }
 
 /// A configurable setting an addon declares; the host renders it as a settings
