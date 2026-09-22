@@ -84,9 +84,9 @@ fn is_supported(host: &str) -> bool {
     is_moly(host) || host.contains("streamtape") || host.contains("mail.ru") || host.contains("voe")
 }
 
-/// The "myTV" player lives on voembed.net, a vidmoly clone: same page, same
-/// player, only the domain differs. Its name contains "voe", so it has to be
-/// told apart from VOE before the hosts are matched.
+/// The "myTV" player lives on voembed.net, which serves a vidmoly player on
+/// some episodes and a VOE one on others. Its name contains "voe", so it has
+/// to be told apart from VOE before the hosts are matched.
 fn is_moly(host: &str) -> bool {
     host.contains("vidmoly") || host.contains("voembed")
 }
@@ -198,7 +198,14 @@ fn video_list(input: Json<Hoster>) -> Result<Json<Vec<Video>>> {
     let hoster = input.0;
     let host = host_of(&hoster.url);
     let videos = if is_moly(&host) {
-        vidmoly(&hoster.url)?
+        // voembed.net answers with a vidmoly page or a VOE one depending on
+        // the episode: vidmoly first, VOE when it yields nothing.
+        let first = vidmoly(&hoster.url).unwrap_or_default();
+        if first.is_empty() && host.contains("voembed") {
+            voe(&hoster.url)?
+        } else {
+            first
+        }
     } else if host.contains("streamtape") {
         streamtape(&hoster.url)?
     } else if host.contains("mail.ru") {
@@ -363,7 +370,10 @@ fn voe(url: &str) -> Result<Vec<Video>, Error> {
     let Some(meta) = voe_decrypt(encoded) else {
         return Ok(Vec::new());
     };
-    let h = headers(&[("Referer", "https://voe.sx/")]);
+    // The stream answers to the embed's own domain (voe.sx, or voembed.net
+    // when myTV falls back here).
+    let referer = format!("https://{}/", host_of(url));
+    let h = headers(&[("Referer", referer.as_str())]);
     let mut out = Vec::new();
     if let Some(src) = meta.get("source").and_then(|v| v.as_str()) {
         out.push(Video {
