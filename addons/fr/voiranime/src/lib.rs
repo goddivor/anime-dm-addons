@@ -85,10 +85,17 @@ fn host_of(url: &str) -> String {
 
 /// Only hosters we can actually decode in `video_list` are worth returning.
 fn is_supported(host: &str) -> bool {
-    host.contains("vidmoly")
+    is_moly(host)
         || host.contains("streamtape")
         || host.contains("mail.ru")
         || host.contains("voe")
+}
+
+/// The "myTV" player lives on voembed.net, which serves a vidmoly player on
+/// some episodes and a VOE one on others. Its name contains "voe", so it has
+/// to be told apart from VOE before the hosts are matched.
+fn is_moly(host: &str) -> bool {
+    host.contains("vidmoly") || host.contains("voembed")
 }
 
 fn abs_url(s: &str) -> String {
@@ -203,8 +210,15 @@ pub fn search(_input: Json<SearchInput>) -> FnResult<Json<AnimesPage>> {
 pub fn video_list(input: Json<Hoster>) -> FnResult<Json<Vec<Video>>> {
     let hoster = input.0;
     let host = host_of(&hoster.url);
-    let videos = if host.contains("vidmoly") {
-        vidmoly(&hoster.url)?
+    let videos = if is_moly(&host) {
+        // voembed.net answers with a vidmoly page or a VOE one depending on
+        // the episode: vidmoly first, VOE when it yields nothing.
+        let first = vidmoly(&hoster.url).unwrap_or_default();
+        if first.is_empty() && host.contains("voembed") {
+            voe(&hoster.url)?
+        } else {
+            first
+        }
     } else if host.contains("streamtape") {
         streamtape(&hoster.url)?
     } else if host.contains("mail.ru") {
@@ -225,10 +239,11 @@ fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 fn vidmoly(url: &str) -> Result<Vec<Video>, Error> {
-    let html = fetch(
-        url,
-        &[("Referer", "https://vidmoly.biz/"), ("Origin", "https://vidmoly.biz")],
-    )?;
+    // The CDN checks that the request comes from the embed's own domain,
+    // whichever clone of the player is serving it.
+    let origin = format!("https://{}", host_of(url));
+    let referer = format!("{origin}/");
+    let html = fetch(url, &[("Referer", &referer), ("Origin", &origin)])?;
     let re = regex::Regex::new(r#"file\s*:\s*["']([^"']+\.m3u8[^"']*)["']"#).unwrap();
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -238,10 +253,7 @@ fn vidmoly(url: &str) -> Result<Vec<Video>, Error> {
             out.push(Video {
                 url: u,
                 quality: "auto".into(),
-                headers: headers(&[
-                    ("Referer", "https://vidmoly.biz/"),
-                    ("Origin", "https://vidmoly.biz"),
-                ]),
+                headers: headers(&[("Referer", &referer), ("Origin", &origin)]),
                 ..Default::default()
             });
         }
@@ -371,7 +383,10 @@ fn voe(url: &str) -> Result<Vec<Video>, Error> {
     let Some(meta) = voe_decrypt(encoded) else {
         return Ok(Vec::new());
     };
-    let h = headers(&[("Referer", "https://voe.sx/")]);
+    // The stream answers to the embed's own domain (voe.sx, or voembed.net
+    // when myTV falls back here).
+    let referer = format!("https://{}/", host_of(url));
+    let h = headers(&[("Referer", referer.as_str())]);
     let mut out = Vec::new();
     if let Some(src) = meta.get("source").and_then(|v| v.as_str()) {
         out.push(Video {
